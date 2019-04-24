@@ -219,7 +219,7 @@ public class PubsubMessageToTableRow
       // Populate additionalProperties.
       Set<String> fieldNames = bqFields.stream().map(Field::getName).collect(Collectors.toSet());
       Sets.difference(parent.keySet(), fieldNames)
-          .forEach(k -> additionalProperties.put(k, parent.get(k)));
+          .forEach(k -> additionalProperties.put(k, parent.remove(k)));
 
       // Special handling.
       bqFields.forEach(field -> {

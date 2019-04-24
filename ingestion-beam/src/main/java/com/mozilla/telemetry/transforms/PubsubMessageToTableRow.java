@@ -233,31 +233,14 @@ public class PubsubMessageToTableRow
       if (field.getType() == LegacySQLTypeName.STRING && field.getMode() == Mode.REPEATED) {
 
         value.filter(List.class::isInstance).map(List.class::cast).ifPresent(list -> {
-          List<Object> jsonified = ((List<Object>) list).stream().map(o -> {
-            if (o instanceof String) {
-              return o;
-            } else {
-              try {
-                return Json.asString(o);
-              } catch (IOException ignore) {
-                return o.toString();
-              }
-            }
-          }).collect(Collectors.toList());
+          List<Object> jsonified = ((List<Object>) list).stream().map(o -> stringify(o))
+              .collect(Collectors.toList());
           parent.put(name, jsonified);
         });
 
         // A string field might need us to JSON-ify an object coerce a value to string.
       } else if (field.getType() == LegacySQLTypeName.STRING && field.getMode() != Mode.REPEATED) {
-        value.filter(v -> !(v instanceof String)).ifPresent(o -> {
-          String stringified;
-          try {
-            stringified = Json.asString(o);
-          } catch (IOException ignore) {
-            stringified = o.toString();
-          }
-          parent.put(name, stringified);
-        });
+        value.ifPresent(o -> parent.put(name, stringify(o)));
 
         // A record of key and value indicates we need to transformForBqSchema a map to an array.
       } else if (field.getType() == LegacySQLTypeName.RECORD && field.getMode() == Mode.REPEATED //
@@ -273,7 +256,8 @@ public class PubsubMessageToTableRow
             transformForBqSchema(map, valueField.getSubFields(), props);
           }
           List<Map<String, Object>> unmapped = map.entrySet().stream()
-              .map(entry -> ImmutableMap.of("key", entry.getKey(), "value", entry.getValue()))
+              .map(entry -> ImmutableMap.of("key", entry.getKey(),
+                  "value", maybeStringify(entry.getValue(), valueField.getType())))
               .collect(Collectors.toList());
           parent.put(name, unmapped);
         });
@@ -297,6 +281,26 @@ public class PubsubMessageToTableRow
         });
       }
     });
+  }
+
+  private static String stringify(Object o){
+    if (o instanceof String) {
+      return (String)o;
+    } else {
+      try {
+        return Json.asString(o);
+      } catch (IOException ignore) {
+        return o.toString();
+      }
+    }
+  }
+
+  private static Object maybeStringify(Object o, LegacySQLTypeName typeName) {
+    if (typeName == LegacySQLTypeName.STRING) {
+      return stringify(o);
+    } else {
+      return o;
+    }
   }
 
 }

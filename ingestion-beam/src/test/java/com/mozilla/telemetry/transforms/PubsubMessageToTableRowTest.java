@@ -93,4 +93,17 @@ public class PubsubMessageToTableRowTest {
     assertEquals(expectedAdditional, Json.asString(additionalProperties));
   }
 
+  @Test
+  public void testPropertyRename() throws Exception {
+    Map<String, Object> parent = new HashMap<>();
+    Map<String, Object> additionalProperties = new HashMap<>();
+    parent.put("64bit", true);
+    parent.put("hi-fi", true);
+    List<Field> bqFields = ImmutableList.of(Field.of("_64bit", LegacySQLTypeName.BOOLEAN), //
+        Field.of("hi_fi", LegacySQLTypeName.BOOLEAN));
+    String expected = "{\"hi_fi\":true,\"_64bit\":true}";
+    PubsubMessageToTableRow.transformForBqSchema(parent, bqFields, additionalProperties);
+    assertEquals(expected, Json.asString(parent));
+  }
+
 }

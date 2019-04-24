@@ -11,20 +11,24 @@ import com.google.api.services.bigquery.model.TimePartitioning;
 import com.google.cloud.bigquery.BigQuery;
 import com.google.cloud.bigquery.BigQueryOptions;
 import com.google.cloud.bigquery.Dataset;
-import com.google.cloud.bigquery.FieldList;
+import com.google.cloud.bigquery.Field;
+import com.google.cloud.bigquery.Field.Mode;
 import com.google.cloud.bigquery.LegacySQLTypeName;
+import com.google.cloud.bigquery.Schema;
 import com.google.cloud.bigquery.Table;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import com.mozilla.telemetry.util.Json;
 import java.io.IOException;
 import java.time.Duration;
-import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -32,7 +36,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryHelpers;
 import org.apache.beam.sdk.io.gcp.bigquery.TableDestination;
@@ -67,7 +70,7 @@ public class PubsubMessageToTableRow
 
   // We'll instantiate these on first use.
   private transient Cache<DatasetReference, Set<String>> tableListingCache;
-  private transient Cache<TableReference, List<List<String>>> tableMapFieldPathCache;
+  private transient Cache<TableReference, Schema> tableSchemaCache;
 
   private PubsubMessageToTableRow(ValueProvider<String> tableSpecTemplate) {
     this.tableSpecTemplate = tableSpecTemplate;
@@ -127,30 +130,29 @@ public class PubsubMessageToTableRow
       throw new IllegalArgumentException("Resolved destination table does not exist: " + tableSpec);
     }
 
-    // Get and cache a list of paths to map-type fields in this schema.
-    List<List<String>> mapFieldPaths;
-    if (tableMapFieldPathCache == null) {
-      tableMapFieldPathCache = CacheBuilder.newBuilder().expireAfterWrite(Duration.ofMinutes(1))
-          .build();
+    // Get and cache the BQ schema for this table.
+    Schema schema = null;
+    if (tableSchemaCache == null) {
+      tableSchemaCache = CacheBuilder.newBuilder().expireAfterWrite(Duration.ofMinutes(1)).build();
     }
     try {
-      mapFieldPaths = tableMapFieldPathCache.get(ref, () -> {
-        List<List<String>> paths = new ArrayList<>();
+      schema = tableSchemaCache.get(ref, () -> {
         BigQuery service = BigQueryOptions.newBuilder().setProjectId(ref.getProjectId()).build()
             .getService();
         Table table = service.getTable(ref.getDatasetId(), ref.getTableId());
         if (table != null) {
-          accumulateMapFieldPaths(ImmutableList.of(), table.getDefinition().getSchema().getFields(),
-              paths);
+          return table.getDefinition().getSchema();
+        } else {
+          return null;
         }
-        return paths;
       });
     } catch (ExecutionException e) {
       throw new UncheckedExecutionException(e);
     }
 
     TableRow tableRow = buildTableRow(message.getPayload());
-    transformMapFields(tableRow, mapFieldPaths);
+    Map<String, Object> additionalProperties = new HashMap<>();
+    transformForBqSchema(tableRow, schema.getFields(), additionalProperties);
     return KV.of(tableDestination, tableRow);
   }
 
@@ -194,63 +196,95 @@ public class PubsubMessageToTableRow
   }
 
   /**
-   * Recursively descend through a list of BQ schema fields, appending paths to discovered
-   * map-type fields.
+   * Recursively descend into the fields of the passed map, comparing to the passed BQ schema,
+   * modifying the structure to avoid map types, nested arrays, etc.
    *
-   * @param position a list of parent field names leading up to the passed fields
-   * @param fields all the fields of the current RECORD-type field
-   * @param mapFieldPaths a growing list of paths to all map-type fields
+   * @param parent the map object to inspect and transform
+   * @param bqFields the list of BQ fields expected inside this object
+   * @param additionalProperties a map into which we place any fields absent from the BQ schema
    */
-  public static void accumulateMapFieldPaths(List<String> position, FieldList fields,
-      List<List<String>> mapFieldPaths) {
-    fields.forEach(field -> {
-      if (LegacySQLTypeName.RECORD.equals(field.getType())) {
-        ArrayList<String> newPosition = new ArrayList<>(position);
-        newPosition.add(field.getName());
-        // Make sure we descend into nested maps first, so that we end up transforming
-        // the deepest maps first.
-        accumulateMapFieldPaths(newPosition, field.getSubFields(), mapFieldPaths);
-        // If this RECORD in the BQ schema looks like a transformed map, we record the path.
-        if (field.getSubFields().size() == 2 //
+  public static void transformForBqSchema(Map<String, Object> parent, List<Field> bqFields,
+      Map<String, Object> additionalProperties) {
+    ImmutableSet.copyOf(parent.keySet()).forEach(key -> {
+
+      // Clean the key names.
+      if (key.contains(".") || key.contains("-")) {
+        key = key.replace(".", "_").replace("-", "_");
+      }
+      if (Character.isDigit(key.charAt(0))) {
+        key = "_" + key;
+      }
+      parent.put(key, parent.remove(key));
+
+      // Populate additionalProperties.
+      Set<String> fieldNames = bqFields.stream().map(Field::getName).collect(Collectors.toSet());
+      Sets.difference(parent.keySet(), fieldNames)
+          .forEach(k -> additionalProperties.put(k, parent.get(k)));
+
+      // Special handling.
+      bqFields.forEach(field -> {
+        String name = field.getName();
+        Optional<Object> value = Optional.ofNullable(parent.get(name));
+
+        // A repeated string field might need us to JSON-ify a list or map.
+        if (field.getType() == LegacySQLTypeName.STRING && field.getMode() == Mode.REPEATED) {
+
+          value.filter(List.class::isInstance).map(List.class::cast).ifPresent(list -> {
+            System.out.println("modifying list");
+            List<Object> jsonified = ((List<Object>) list).stream().map(o -> {
+              if (o instanceof String) {
+                return o;
+              } else {
+                try {
+                  System.out.println("jsonifying");
+                  return Json.asString(o);
+                } catch (IOException ignore) {
+                  return o;
+                }
+              }
+            }).collect(Collectors.toList());
+            parent.put(name, jsonified);
+          });
+
+          // A record of key and value indicates we need to transformForBqSchema a map to an array.
+        } else if (field.getType() == LegacySQLTypeName.RECORD //
+            && field.getMode() == Mode.REPEATED //
+            && field.getSubFields().size() == 2 //
             && field.getSubFields().get(0).getName().equals("key") //
             && field.getSubFields().get(1).getName().equals("value")) {
-          mapFieldPaths.add(newPosition);
-        }
-      }
-    });
-  }
+          value.filter(Map.class::isInstance).map(Map.class::cast).ifPresent(m -> {
+            Map<String, Object> map = m;
+            Field valueField = field.getSubFields().get(1);
+            if (valueField.getType() == LegacySQLTypeName.RECORD) {
+              Map<String, Object> props = new HashMap<>();
+              additionalProperties.put(name, props);
+              transformForBqSchema(map, valueField.getSubFields(), props);
+            }
+            List<Map<String, Object>> unmapped = map.entrySet().stream()
+                .map(entry -> ImmutableMap.of("key", entry.getKey(), "value", entry.getValue()))
+                .collect(Collectors.toList());
+            parent.put(name, unmapped);
+          });
 
-  /**
-   * Given a parsed json object and list of paths to map-type fields, descend through the
-   * structure and replace all map-type fields with an equivalent list of key/value pairs.
-   */
-  public static void transformMapFields(TableRow row, List<List<String>> mapFieldPaths) {
-    mapFieldPaths.forEach(path -> {
-      List<String> parentPath = new ArrayList<>(path);
-      String targetFieldName = parentPath.remove(path.size() - 1);
-      // Since the path was determined from the BQ schema where maps were already transformed,
-      // we have to remove elements named "value".
-      parentPath = parentPath.stream().filter(n -> !"value".equals(n)).collect(Collectors.toList());
-      Stream<Map<String, Object>> stream = ImmutableList.<Map<String, Object>>of(row).stream();
-      for (String name : parentPath) {
-        stream = stream.map(f -> f.get(name)).flatMap(f -> {
-          if (f == null) {
-            return ImmutableList.<Object>of().stream();
-          } else if (f instanceof List) {
-            return ((List<Object>) f).stream();
-          } else {
-            return ImmutableList.of((Object) f).stream();
-          }
-        }).filter(Map.class::isInstance).map(f -> (Map<String, Object>) f);
-      }
-      stream.forEach(parent -> {
-        Object target = parent.get(targetFieldName);
-        if (target instanceof Map) {
-          List<ImmutableMap<String, Object>> modified = ((Map<String, Object>) target).entrySet()
-              .stream()
-              .map(entry -> ImmutableMap.of("key", entry.getKey(), "value", entry.getValue()))
-              .collect(Collectors.toList());
-          parent.put(targetFieldName, modified);
+          // We need to recursively call transformForBqSchema on any normal record type.
+        } else if (field.getType() == LegacySQLTypeName.RECORD
+            && field.getMode() != Mode.REPEATED) {
+          value.filter(Map.class::isInstance).map(Map.class::cast).ifPresent(m -> {
+            Map<String, Object> props = new HashMap<>();
+            additionalProperties.put(name, props);
+            transformForBqSchema(m, field.getSubFields(), props);
+          });
+
+          // Likewise, we need to recursively call transformForBqSchema on repeated record types.
+        } else if (field.getType() == LegacySQLTypeName.RECORD
+            && field.getMode() == Mode.REPEATED) {
+          List<Object> records = value.filter(List.class::isInstance).map(List.class::cast)
+              .orElse(ImmutableList.of());
+          records.stream().filter(Map.class::isInstance).map(Map.class::cast).forEach(record -> {
+            Map<String, Object> props = new HashMap<>();
+            additionalProperties.put(name, props);
+            transformForBqSchema(record, field.getSubFields(), props);
+          });
         }
       });
     });

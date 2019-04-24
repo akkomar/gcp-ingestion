@@ -51,6 +51,16 @@ public class PubsubMessageToTableRowTest {
   }
 
   @Test
+  public void testTransformEmptyObjectToJsonString() throws Exception {
+    Map<String, Object> parent = new HashMap<>();
+    parent.put("payload", new HashMap<>());
+    List<Field> bqFields = ImmutableList.of(Field.of("payload", LegacySQLTypeName.STRING));
+    String expected = "{\"payload\":\"{}\"}";
+    PubsubMessageToTableRow.transformForBqSchema(parent, bqFields, null);
+    assertEquals(expected, Json.asString(parent));
+  }
+
+  @Test
   public void testUnmap() throws Exception {
     Map<String, Object> parent = new HashMap<>();
     Map<String, Object> additionalProperties = new HashMap<>();

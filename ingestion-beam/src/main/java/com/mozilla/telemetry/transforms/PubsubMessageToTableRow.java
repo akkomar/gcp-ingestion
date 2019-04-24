@@ -237,7 +237,6 @@ public class PubsubMessageToTableRow
               return o;
             } else {
               try {
-                System.out.println("jsonifying");
                 return Json.asString(o);
               } catch (IOException ignore) {
                 return o;
@@ -245,6 +244,16 @@ public class PubsubMessageToTableRow
             }
           }).collect(Collectors.toList());
           parent.put(name, jsonified);
+        });
+
+        // A string field might need us to JSON-ify an object.
+      } else if (field.getType() == LegacySQLTypeName.STRING && field.getMode() != Mode.REPEATED) {
+        value.filter(v -> !(v instanceof String)).ifPresent(o -> {
+          try {
+            parent.put(name, Json.asString(o));
+          } catch (IOException ignore) {
+            // pass
+          }
         });
 
         // A record of key and value indicates we need to transformForBqSchema a map to an array.

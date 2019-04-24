@@ -210,7 +210,7 @@ public class PubsubMessageToTableRow
         // Make sure we descend into nested maps first, so that we end up transforming
         // the deepest maps first.
         accumulateMapFieldPaths(newPosition, field.getSubFields(), mapFieldPaths);
-        // If this RECORD in the BQ schmea looks like a transformed map, we record the path.
+        // If this RECORD in the BQ schema looks like a transformed map, we record the path.
         if (field.getSubFields().size() == 2 //
             && field.getSubFields().get(0).getName().equals("key") //
             && field.getSubFields().get(1).getName().equals("value")) {

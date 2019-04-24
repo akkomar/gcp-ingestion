@@ -40,7 +40,7 @@ public class PubsubMessageToTableRowTest {
   }
 
   @Test
-  public void testTransformNestedArrayToJsonString() throws Exception {
+  public void testCoerceNestedArrayToJsonString() throws Exception {
     Map<String, Object> parent = new HashMap<>();
     parent.put("events", Arrays.asList(Arrays.asList("hi", "there")));
     List<Field> bqFields = ImmutableList
@@ -51,11 +51,21 @@ public class PubsubMessageToTableRowTest {
   }
 
   @Test
-  public void testTransformEmptyObjectToJsonString() throws Exception {
+  public void testCoerceEmptyObjectToJsonString() throws Exception {
     Map<String, Object> parent = new HashMap<>();
     parent.put("payload", new HashMap<>());
     List<Field> bqFields = ImmutableList.of(Field.of("payload", LegacySQLTypeName.STRING));
     String expected = "{\"payload\":\"{}\"}";
+    PubsubMessageToTableRow.transformForBqSchema(parent, bqFields, null);
+    assertEquals(expected, Json.asString(parent));
+  }
+
+  @Test
+  public void testCoerceIntToString() throws Exception {
+    Map<String, Object> parent = new HashMap<>();
+    parent.put("payload", 3);
+    List<Field> bqFields = ImmutableList.of(Field.of("payload", LegacySQLTypeName.STRING));
+    String expected = "{\"payload\":\"3\"}";
     PubsubMessageToTableRow.transformForBqSchema(parent, bqFields, null);
     assertEquals(expected, Json.asString(parent));
   }

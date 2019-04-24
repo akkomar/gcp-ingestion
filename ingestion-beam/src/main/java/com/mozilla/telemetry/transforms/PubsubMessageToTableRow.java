@@ -153,6 +153,7 @@ public class PubsubMessageToTableRow
     TableRow tableRow = buildTableRow(message.getPayload());
     Map<String, Object> additionalProperties = new HashMap<>();
     transformForBqSchema(tableRow, schema.getFields(), additionalProperties);
+    tableRow.put("additional_properties", Json.asString(additionalProperties));
     return KV.of(tableDestination, tableRow);
   }
 
@@ -239,21 +240,23 @@ public class PubsubMessageToTableRow
               try {
                 return Json.asString(o);
               } catch (IOException ignore) {
-                return o;
+                return o.toString();
               }
             }
           }).collect(Collectors.toList());
           parent.put(name, jsonified);
         });
 
-        // A string field might need us to JSON-ify an object.
+        // A string field might need us to JSON-ify an object coerce a value to string.
       } else if (field.getType() == LegacySQLTypeName.STRING && field.getMode() != Mode.REPEATED) {
         value.filter(v -> !(v instanceof String)).ifPresent(o -> {
+          String stringified;
           try {
-            parent.put(name, Json.asString(o));
+            stringified = Json.asString(o);
           } catch (IOException ignore) {
-            // pass
+            stringified = o.toString();
           }
+          parent.put(name, stringified);
         });
 
         // A record of key and value indicates we need to transformForBqSchema a map to an array.
